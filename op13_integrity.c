@@ -729,4 +729,4 @@ module_init(op13_integrity_init);
 module_exit(op13_integrity_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("OpenAI");
-MODULE_DESCRIPTION("Read-only syscall and module-load integrity monitor");
+MODULE_DESCRIPTION("Syscall and module-load integrity monitor with original-style whitelist interfaces");
