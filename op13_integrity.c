@@ -695,11 +695,9 @@ remove_compat_proc:
 	if (op13_ko_entry)
 		proc_remove(op13_ko_entry);
 	op13_ko_entry = NULL;
-remove_proc:
 	if (op13_proc_entry)
 		proc_remove(op13_proc_entry);
 	op13_proc_entry = NULL;
-destroy_workqueue:
 	destroy_workqueue(op13_module_wq);
 	op13_module_wq = NULL;
 free_sha256:
