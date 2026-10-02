@@ -65,6 +65,7 @@ static bool op13_baseline_ready;
 static bool op13_syscall_changed;
 static atomic_t op13_module_events = ATOMIC_INIT(0);
 static struct delayed_work op13_check_work;
+static struct workqueue_struct *op13_module_wq;
 static struct proc_dir_entry *op13_proc_entry;
 
 struct op13_module_work {
@@ -261,7 +262,7 @@ static int op13_module_return(struct kretprobe_instance *instance,
 	if (!event)
 		return 0;
 	INIT_WORK(&event->work, op13_module_workfn);
-	schedule_work(&event->work);
+	queue_work(op13_module_wq, &event->work);
 	return 0;
 }
 
@@ -321,11 +322,18 @@ static int __init op13_integrity_init(void)
 		goto free_sha256;
 	op13_baseline_ready = true;
 
+	op13_module_wq = alloc_workqueue("op13_integrity",
+					WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
+	if (!op13_module_wq) {
+		ret = -ENOMEM;
+		goto free_sha256;
+	}
+
 	op13_proc_entry = proc_create("op13_integrity", 0444, NULL,
 				      &op13_proc_ops);
 	if (!op13_proc_entry) {
 		ret = -ENOMEM;
-		goto free_sha256;
+		goto destroy_workqueue;
 	}
 
 	ret = register_kretprobe(&op13_module_probe);
@@ -340,6 +348,9 @@ static int __init op13_integrity_init(void)
 remove_proc:
 	proc_remove(op13_proc_entry);
 	op13_proc_entry = NULL;
+destroy_workqueue:
+	destroy_workqueue(op13_module_wq);
+	op13_module_wq = NULL;
 free_sha256:
 	crypto_free_shash(op13_sha256);
 	op13_sha256 = NULL;
@@ -350,7 +361,10 @@ static void __exit op13_integrity_exit(void)
 {
 	cancel_delayed_work_sync(&op13_check_work);
 	unregister_kretprobe(&op13_module_probe);
-	flush_workqueue(system_wq);
+	if (op13_module_wq) {
+		destroy_workqueue(op13_module_wq);
+		op13_module_wq = NULL;
+	}
 	if (op13_proc_entry)
 		proc_remove(op13_proc_entry);
 	if (op13_sha256)
