@@ -86,7 +86,7 @@ jobs:
               fi
               make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
               make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
-              make -C kernel-src O=/build/.kernel-out M=/build ARCH=arm64 LLVM=1 LLVM_IAS=1 modules
+              make -C kernel-src O=/build/.kernel-out M=/build ARCH=arm64 LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN=1 modules
             '
 
       - name: Collect build metadata
