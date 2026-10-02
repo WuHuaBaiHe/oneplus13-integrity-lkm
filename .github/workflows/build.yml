@@ -42,28 +42,47 @@ jobs:
               set -euo pipefail
               export ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
               test -f kernel-src/Makefile
-              # The public kernel branch contains symlinks to separately
-              # published vendor trees. The LKM only needs common headers,
-              # so replace dangling links with explicit Kconfig stubs.
+              # The public branch omits separately published vendor trees.
+              # Replace dangling links and missing Kconfig source files with
+              # explicit stubs so only common headers are prepared.
               for link in $(find kernel-src -type l); do
                 if [ ! -e "$link" ]; then
                   target=$(readlink "$link")
                   rm "$link"
-                  case "$link" in
-                    */Kconfig|*/Kconfig.*)
-                      printf "%s\n" "# Missing vendor tree: $target" > "$link"
-                      ;;
-                    *)
-                      mkdir -p "$link"
-                      printf "%s\n" "# Missing vendor tree: $target" > "$link/Kconfig"
-                      ;;
-                  esac
+                  mkdir -p "$link"
+                  printf "%s\n" "# Missing vendor tree: $target" > "$link/Kconfig"
                 fi
               done
+              prepare_gki_config() {
+                local attempt=1 output status missing path
+                while [ "$attempt" -le 64 ]; do
+                  set +e
+                  output=$(make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig 2>&1)
+                  status=$?
+                  set -e
+                  printf "%s\n" "$output"
+                  if [ "$status" -eq 0 ]; then
+                    return 0
+                  fi
+                  missing=$(printf "%s\n" "$output" | sed -n "s/.*can't open file \"\([^\"]*\)\".*/\1/p" | tail -n 1)
+                  if [ -z "$missing" ]; then
+                    return "$status"
+                  fi
+                  path="kernel-src/$missing"
+                  if [ -L "$path" ]; then
+                    rm "$path"
+                  fi
+                  mkdir -p "$(dirname "$path")"
+                  printf "%s\n" "# Missing vendor Kconfig: $missing" > "$path"
+                  attempt=$((attempt + 1))
+                done
+                echo "Too many missing vendor Kconfig files" >&2
+                return 1
+              }
               if [ -f kernel-src/.config ]; then
                 cp kernel-src/.config .kernel-out/.config
               else
-                make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
+                prepare_gki_config
               fi
               make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
               make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
