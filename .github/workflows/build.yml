@@ -64,7 +64,7 @@ jobs:
                   if [ "$status" -eq 0 ]; then
                     return 0
                   fi
-                  missing=$(printf "%s\n" "$output" | sed -n "s/.*can't open file \"\([^\"]*\)\".*/\1/p" | tail -n 1)
+                  missing=$(printf "%s\n" "$output" | sed -n "s/.*open file \"\([^\"]*\)\".*/\1/p" | tail -n 1)
                   if [ -z "$missing" ]; then
                     return "$status"
                   fi
