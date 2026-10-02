@@ -11,9 +11,32 @@ Linux 6.6.118
 ## 功能
 
 - 加载时解析 `sys_call_table`，保存系统调用表 SHA-256 基线。
-- 每小时重新计算系统调用表哈希并在变化时写入内核日志。
-- 通过 `kretprobe` 观察 `load_module` 的入口参数，对待加载模块镜像计算 SHA-256 并记录模块名和哈希。
-- 提供只读状态节点：`/proc/op13_integrity`。
+- 每小时重新计算系统调用表哈希；首次发现变化时记录事件并写入内核日志。
+- 通过 `kretprobe` 观察 `load_module`，复制待加载模块镜像并异步计算 SHA-256。
+- 对模块名和 SHA-256 进行白名单比对，记录允许/未登记模块。
+- 保留最近 10 条模块事件和最近 10 条系统调用表异常事件，对应原版的事件容量。
+- 提供状态节点：`/proc/op13_integrity`。
+- 提供 Ace 6 Ultra 原版兼容节点：`/proc/inte_ko`、`/proc/inte_systbl`、`/proc/inte_status`。
+
+兼容节点的基本格式如下：
+
+```text
+# 写入或更新模块白名单（需要 root）
+echo 'module_name sha256_hex_64_chars' > /proc/inte_ko
+
+# 清空模块白名单
+echo clear > /proc/inte_ko
+
+# 查看系统调用表异常事件
+echo clear > /proc/inte_systbl
+cat /proc/inte_systbl
+
+# 设置原版风格的状态标志
+echo 1 > /proc/inte_status
+cat /proc/inte_status
+```
+
+`/proc/inte_ko` 中的哈希必须是模块镜像的 SHA-256。未写入白名单的模块会记录为 `allowed=false`；该模块只负责检测和记录，是否阻止游戏或卸载模块由上层安全服务决定。事件日志使用原版源码中的 `KO_EVENT_FLAG=10000` 标识，容量为 `MAX_EVENTS_COUNT=10`。
 
 模块不修改系统调用表、模块内存、凭据、安全钩子或其他进程，也不隐藏自身或绕过模块签名。
 
