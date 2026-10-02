@@ -49,7 +49,7 @@ jobs:
               if [ -L kernel-src/kernel/oplus_cpu ] && [ ! -e kernel-src/kernel/oplus_cpu ]; then
                 rm kernel-src/kernel/oplus_cpu
                 mkdir -p kernel-src/kernel/oplus_cpu
-                printf '%s\n' '# Vendor OPLUS CPU tree is not part of the public kernel repo.' \
+                printf "%s\n" "# Vendor OPLUS CPU tree is not part of the public kernel repo." \
                   > kernel-src/kernel/oplus_cpu/Kconfig
               fi
               if [ -f kernel-src/.config ]; then
