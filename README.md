@@ -33,7 +33,7 @@ git clone --depth=1 \
 
 然后准备与目标设备匹配的内核输出目录。至少需要目标设备实际使用的 `.config`；只使用通用 `gki_defconfig` 只能用于接口/语法验证，不能保证生成的模块与出厂内核 ABI 匹配。
 
-该公开分支中的 `kernel/oplus_cpu` 是指向单独 vendor 源码的符号链接，而 vendor CPU 子树不在这个仓库内。Actions 在缺少链接目标时创建一个明确标注的空 Kconfig stub，只用于准备公共内核头文件和编译本模块；这不等同于完整的 OnePlus 内核构建。若你有对应 vendor 源码，应在构建前恢复真实目录。
+该公开分支中多个 `kernel/`、`mm/` 路径是指向单独 vendor 源码的符号链接，而 vendor 子树不在这个仓库内。Actions 在缺少链接目标时创建明确标注的空 Kconfig stub，只用于准备公共内核头文件和编译本模块；这不等同于完整的 OnePlus 内核构建。若你有对应 vendor 源码，应在构建前恢复真实目录。
 
 ### 使用 DDK Docker 镜像
 
