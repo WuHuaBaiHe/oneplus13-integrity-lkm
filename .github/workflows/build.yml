@@ -17,6 +17,12 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [standard, debug]
+    env:
+      BUILD_VARIANT: ${{ matrix.variant }}
     steps:
       - name: Checkout module project
         uses: actions/checkout@v4
@@ -37,7 +43,7 @@ jobs:
           set -euo pipefail
           mkdir -p .kernel-out
           docker run --rm --platform linux/amd64 \
-            -v "$PWD":/build -w /build \
+            -v "$PWD":/build -w /build -e BUILD_VARIANT \
             "$DDK_IMAGE" bash -lc '
               set -euo pipefail
               export ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
@@ -84,7 +90,17 @@ jobs:
               else
                 prepare_gki_config
               fi
+              if [ "$BUILD_VARIANT" = debug ]; then
+                kernel-src/scripts/config --file .kernel-out/.config -e DYNAMIC_DEBUG -e DEBUG_KERNEL -e DEBUG_OBJECTS -e DEBUG_KMEMLEAK
+              else
+                kernel-src/scripts/config --file .kernel-out/.config -d DEBUG_KMEMLEAK
+              fi
               make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+              if [ "$BUILD_VARIANT" = debug ]; then
+                for option in DYNAMIC_DEBUG DEBUG_OBJECTS DEBUG_KMEMLEAK; do
+                  grep -qx "CONFIG_${option}=y" .kernel-out/.config
+                done
+              fi
               make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
               make -C kernel-src O=/build/.kernel-out M=/build ARCH=arm64 LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN=1 modules
             '
@@ -105,6 +121,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oneplus13-integrity-lkm
+          name: oneplus13-integrity-lkm-${{ matrix.variant }}
           path: artifact/
           if-no-files-found: warn

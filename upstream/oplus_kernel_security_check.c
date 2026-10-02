@@ -25,9 +25,6 @@
 #include <linux/hashtable.h>
 #include <linux/jhash.h>
 #include <linux/rwlock.h>
-#include <linux/uaccess.h>
-#include <linux/timekeeping.h>
-#include <asm/unistd.h>
 /***************** config ************************************/
 #define SHA256_DIGEST_SIZE 32
 #define CHUNK_SIZE 4096
@@ -333,17 +330,10 @@ static char *get_modinfo_name_safe(const struct load_info *info)
 	Elf_Ehdr *hdr = info->hdr;
 	Elf_Shdr *sechdrs, *strhdr;
 	char *secstrings;
-	unsigned long len = info->len;
-	if (len < sizeof(*hdr) || hdr->e_shentsize != sizeof(Elf_Shdr) ||
-	    !hdr->e_shnum || hdr->e_shoff > len ||
-	    hdr->e_shnum > (len - hdr->e_shoff) / sizeof(Elf_Shdr))
-		return NULL;
 	sechdrs = (void *)hdr + hdr->e_shoff;
 	if (hdr->e_shstrndx >= hdr->e_shnum)
 		return NULL;
 	strhdr = &sechdrs[hdr->e_shstrndx];
-	if (strhdr->sh_offset > len || strhdr->sh_size > len - strhdr->sh_offset)
-		return NULL;
 	secstrings = (void *)hdr + strhdr->sh_offset;
 	int info_idx = -1;
 	int count = 0;
@@ -352,9 +342,6 @@ static char *get_modinfo_name_safe(const struct load_info *info)
             continue;
         }
 		char *curr_name = secstrings + sechdrs[i].sh_name;
-		if (strnlen(curr_name, strhdr->sh_size - sechdrs[i].sh_name) ==
-		    strhdr->sh_size - sechdrs[i].sh_name)
-			continue;
 		if (curr_name[0] == '.' && strcmp(curr_name, ".modinfo") == 0) {
 			count++;
 			info_idx = i;
@@ -364,14 +351,9 @@ static char *get_modinfo_name_safe(const struct load_info *info)
 		}
 	}
 	if (count == 1) {
-		if (sechdrs[info_idx].sh_offset > len ||
-		    sechdrs[info_idx].sh_size > len - sechdrs[info_idx].sh_offset)
-			return NULL;
 		char *modinfo = (char *)hdr + sechdrs[info_idx].sh_offset;
 		unsigned long size = sechdrs[info_idx].sh_size;
-		for (p = modinfo; p && size; p = next_tag_safe(p, &size)) {
-			if (strnlen(p, size) == size)
-				return NULL;
+		for (p = modinfo; p; p = next_tag_safe(p, &size)) {
 			if (size > target_len && memcmp(p, target, target_len) == 0) {
 				return p + target_len;
 			}
@@ -727,7 +709,6 @@ static ssize_t proc_write_status(struct file *file, const char __user *buffer, s
     }
     if (count < sizeof(int)) {
         pr_err("[KERNEL_SECURITY_CHECK]:Invalid buffer size\n");
-        return -EINVAL;
     }
     if (copy_from_user(&status, buffer, sizeof(int))) {
         pr_err("[KERNEL_SECURITY_CHECK]:Failed to copy status.\n");
@@ -765,79 +746,95 @@ static const struct proc_ops proc_fops_status = {
 
 /********************** proc_ops(end) **************************/
 
-/* LKM adaptation: prepare private state before publishing proc callbacks. */
 static int __init __nocfi ko_integrity_init(void)
 {
-    int ret, bucket;
-    struct hash_tbl_node *entry;
-    struct hlist_node *tmp;
-    ksym_lookup_name look_func;
-    struct kprobe getname_kp = {
-        .symbol_name = "kallsyms_lookup_name",
-    };
-
+    int ret = 0;
     rwlock_init(&hashtable_lock);
     rwlock_init(&ko_events_list_rwlock);
     rwlock_init(&systbl_events_list_rwlock);
-    hash_init(inte_hash_table);
-    INIT_DELAYED_WORK(&check_work, check_task);
-
+    proc_ko_entry = proc_create("inte_ko", 0664, NULL, &proc_fops_ko);
+    proc_set_user(proc_ko_entry, KUIDT_INIT(0), KGIDT_INIT(0));
+    if (!proc_ko_entry) {
+        pr_err("[KERNEL_SECURITY_CHECK]: Failed to create /proc/inte_ko\n");
+        return -ENOMEM;
+    }
+    proc_systbl_entry = proc_create("inte_systbl", 0664, NULL, &proc_fops_systbl);
+    proc_set_user(proc_systbl_entry, KUIDT_INIT(0), KGIDT_INIT(0));
+    if (!proc_systbl_entry) {
+        pr_err("[KERNEL_SECURITY_CHECK]: Failed to create /proc/inte_systbl\n");
+        ret = -ENOMEM;
+        goto proc_failed;
+    }
+    proc_status_entry = proc_create("inte_status", 0660, NULL, &proc_fops_status);
+    proc_set_user(proc_status_entry, KUIDT_INIT(0), KGIDT_INIT(0));
+    if (!proc_status_entry) {
+        ret = -ENOMEM;
+        pr_err("[KERNEL_SECURITY_CHECK]: Failed to create /proc/inte_status\n");
+        goto proc_failed;
+    }
+    pr_info("[KERNEL_SECURITY_CHECK]: create /proc/inte_* succeed \n");
+    /***************************resigter main hook ***********************/
+    hash_probe.kp.symbol_name = "load_module";
+    ret = register_kretprobe(&hash_probe);
+    if (ret < 0) {
+        pr_err("[KERNEL_SECURITY_CHECK]: hash_probe register failed ! \n ");
+        goto proc_failed;
+    }
+    /***************************resigter main hook(end) ***********************/
+    ksym_lookup_name look_func = NULL;
+    static struct kprobe getname_kp = {
+        .symbol_name = "kallsyms_lookup_name",
+    };
     ret = register_kprobe(&getname_kp);
-    if (ret)
-        return ret;
+    if (ret < 0) {
+        pr_err("[KERNEL_SECURITY_CHECK]: find [kallsyms_lookup_name] address failed ! \n ");
+        goto init_failed;
+    }
     look_func = (ksym_lookup_name)getname_kp.addr;
     unregister_kprobe(&getname_kp);
     sys_call_table = (unsigned long *)look_func("sys_call_table");
-    if (!sys_call_table)
-        return -ENOENT;
+    if (!sys_call_table) {
+        pr_err("[KERNEL_SECURITY_CHECK]: Failed to find sys_call_table\n");
+        ret = -ENOENT;
+        goto init_failed;
+    }
     g_sha256_tfm = crypto_alloc_shash("sha256", 0, 0);
-    if (IS_ERR(g_sha256_tfm))
-        return PTR_ERR(g_sha256_tfm);
+    if (IS_ERR(g_sha256_tfm)) {
+        pr_err("[KERNEL_SECURITY_CHECK]: Failed to allocate sha256 tfm.\n");
+        ret = PTR_ERR(g_sha256_tfm);
+        goto init_failed;
+    }
     memcpy(syscall_func_addr, sys_call_table, sizeof(syscall_func_addr));
     ret = do_hash(syscall_func_addr, sizeof(syscall_func_addr), hash_systbl_init);
-    if (ret)
-        goto free_crypto;
-
-    hash_probe.kp.symbol_name = "load_module";
-    ret = register_kretprobe(&hash_probe);
-    if (ret)
-        goto free_crypto;
-
-    proc_ko_entry = proc_create("inte_ko", 0664, NULL, &proc_fops_ko);
-    if (!proc_ko_entry) {
-        ret = -ENOMEM;
-        goto remove_proc;
+    if (ret == 0) {
+        pr_info("[KERNEL_SECURITY_CHECK]: init hash for syscall_tbl succeed.");
+    } else {
+        pr_err("[KERNEL_SECURITY_CHECK]: init hash for syscall_tbl failed.");
+        goto init_failed;
     }
-    proc_set_user(proc_ko_entry, KUIDT_INIT(0), KGIDT_INIT(0));
-    proc_systbl_entry = proc_create("inte_systbl", 0664, NULL, &proc_fops_systbl);
-    if (!proc_systbl_entry) {
-        ret = -ENOMEM;
-        goto remove_proc;
-    }
-    proc_set_user(proc_systbl_entry, KUIDT_INIT(0), KGIDT_INIT(0));
-    proc_status_entry = proc_create("inte_status", 0660, NULL, &proc_fops_status);
-    if (!proc_status_entry) {
-        ret = -ENOMEM;
-        goto remove_proc;
-    }
-    proc_set_user(proc_status_entry, KUIDT_INIT(0), KGIDT_INIT(0));
+    pr_info("[KERNEL_SECURITY_CHECK]: set DELAYED_WORK succeed. (interval 1H)");
+    INIT_DELAYED_WORK(&check_work, check_task);
+    // first schedule（1h）
     schedule_delayed_work(&check_work, check_interval);
+    hash_init(inte_hash_table);
     pr_info("[KERNEL_SECURITY_CHECK]:init success! , version :0.16\n");
-    return 0;
-
-remove_proc:
-    proc_remove(proc_status_entry);
-    proc_remove(proc_systbl_entry);
-    proc_remove(proc_ko_entry);
+    return ret;
+init_failed:
+    if (g_sha256_tfm && !IS_ERR(g_sha256_tfm)) {
+            crypto_free_shash(g_sha256_tfm);
+            g_sha256_tfm = NULL;
+        }
     unregister_kretprobe(&hash_probe);
-    hash_for_each_safe(inte_hash_table, bucket, tmp, entry, node) {
-        hash_del(&entry->node);
-        kfree(entry);
+proc_failed:
+    if (proc_ko_entry) {
+        remove_proc_entry("inte_ko", NULL);
     }
-    trigger_clean_event_manual();
-free_crypto:
-    crypto_free_shash(g_sha256_tfm);
-    g_sha256_tfm = NULL;
+    if (proc_systbl_entry) {
+        remove_proc_entry("inte_systbl", NULL);
+    }
+    if (proc_status_entry) {
+        remove_proc_entry("inte_status", NULL);
+    }
     return ret;
 }
 
@@ -846,14 +843,11 @@ static void __exit ko_integrity_exit(void)
     int i;
     struct hash_tbl_node *entry;
     struct hlist_node *tmp;
-
-    /* Drain proc callbacks before freeing their backing state. */
-    proc_remove(proc_status_entry);
-    proc_remove(proc_systbl_entry);
-    proc_remove(proc_ko_entry);
     cancel_delayed_work_sync(&check_work);
     unregister_kretprobe(&hash_probe);
-    crypto_free_shash(g_sha256_tfm);
+    if (g_sha256_tfm) {
+        crypto_free_shash(g_sha256_tfm);
+    }
     write_lock(&hashtable_lock);
     hash_for_each_safe(inte_hash_table, i, tmp, entry, node) {
         hash_del(&entry->node);
@@ -861,6 +855,15 @@ static void __exit ko_integrity_exit(void)
     }
     write_unlock(&hashtable_lock);
     trigger_clean_event_manual();
+    if (proc_ko_entry) {
+        remove_proc_entry("inte_ko", NULL);
+    }
+    if (proc_systbl_entry) {
+        remove_proc_entry("inte_systbl", NULL);
+    }
+    if (proc_status_entry) {
+        remove_proc_entry("inte_status", NULL);
+    }
     pr_info("[KERNEL_SECURITY_CHECK]: exit success!");
 }
 
