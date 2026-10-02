@@ -1,0 +1,73 @@
+name: Build OnePlus 13 integrity LKM
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  KERNEL_REPOSITORY: OnePlusOSS/android_kernel_oneplus_sm8750
+  KERNEL_REF: oneplus/sm8750_b_16.0.0_oneplus_13
+  DDK_IMAGE: ghcr.io/ylarod/ddk:android15-6.6
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout module project
+        uses: actions/checkout@v4
+
+      - name: Fetch target kernel source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch "$KERNEL_REF" \
+            "https://github.com/$KERNEL_REPOSITORY.git" kernel-src
+          git -C kernel-src rev-parse HEAD | tee kernel-commit.txt
+          printf 'Linux version: '
+          sed -n '1,5p' kernel-src/Makefile | tee kernel-version.txt
+
+      - name: Build with DDK Android 15 6.6 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .kernel-out
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD":/build -w /build \
+            "$DDK_IMAGE" bash -lc '
+              set -euo pipefail
+              export ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
+              test -f kernel-src/Makefile
+              if [ -f kernel-src/.config ]; then
+                cp kernel-src/.config .kernel-out/.config
+              else
+                make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
+              fi
+              make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+              make -C kernel-src O=/build/.kernel-out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
+              make -C kernel-src O=/build/.kernel-out M=/build ARCH=arm64 LLVM=1 LLVM_IAS=1 modules
+            '
+
+      - name: Collect build metadata
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          cp -f kernel-commit.txt kernel-version.txt artifact/ 2>/dev/null || true
+          cp -f .kernel-out/.config artifact/kernel.config 2>/dev/null || true
+          find . -maxdepth 2 -type f \
+            \( -name '*.ko' -o -name 'Module.symvers' -o -name 'modules.order' \) \
+            -exec cp --parents {} artifact/ \; 2>/dev/null || true
+
+      - name: Upload module and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oneplus13-integrity-lkm
+          path: artifact/
+          if-no-files-found: warn

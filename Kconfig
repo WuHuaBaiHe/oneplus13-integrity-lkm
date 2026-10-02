@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config OP13_INTEGRITY
+	tristate "OnePlus 13 kernel integrity monitor"
+	depends on MODULES && KPROBES && KRETPROBES && KALLSYMS
+	select CRYPTO_SHA256
+	help
+	  Read-only syscall-table and module-load integrity monitoring for
+	  the OnePlus SM8750 6.6.118 kernel branch.
