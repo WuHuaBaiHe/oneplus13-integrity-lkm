@@ -42,6 +42,16 @@ jobs:
               set -euo pipefail
               export ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
               test -f kernel-src/Makefile
+              # The public kernel branch contains a dangling symlink to the
+              # separately published vendor module tree. The LKM only needs
+              # the common kernel headers, so provide an explicit empty Kconfig
+              # stub rather than silently following a missing path.
+              if [ -L kernel-src/kernel/oplus_cpu ] && [ ! -e kernel-src/kernel/oplus_cpu ]; then
+                rm kernel-src/kernel/oplus_cpu
+                mkdir -p kernel-src/kernel/oplus_cpu
+                printf '%s\n' '# Vendor OPLUS CPU tree is not part of the public kernel repo.' \
+                  > kernel-src/kernel/oplus_cpu/Kconfig
+              fi
               if [ -f kernel-src/.config ]; then
                 cp kernel-src/.config .kernel-out/.config
               else
