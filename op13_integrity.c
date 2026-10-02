@@ -208,7 +208,7 @@ static int op13_module_entry(struct kretprobe_instance *instance,
 	struct op13_load_info *info;
 	struct op13_module_work *event;
 
-	if (!regs || !instance || !instance->data)
+	if (!regs || !instance)
 		return 0;
 	*(struct op13_module_work **)instance->data = NULL;
 	info = (struct op13_load_info *)regs_get_kernel_argument(regs, 0);
@@ -255,7 +255,7 @@ static int op13_module_return(struct kretprobe_instance *instance,
 {
 	struct op13_module_work *event;
 
-	if (!instance || !instance->data)
+	if (!instance)
 		return 0;
 	event = *(struct op13_module_work **)instance->data;
 	if (!event)
