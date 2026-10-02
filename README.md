@@ -33,7 +33,7 @@ git clone --depth=1 \
 
 然后准备与目标设备匹配的内核输出目录。至少需要目标设备实际使用的 `.config`；只使用通用 `gki_defconfig` 只能用于接口/语法验证，不能保证生成的模块与出厂内核 ABI 匹配。
 
-该公开分支中多个 `kernel/`、`mm/` 路径是指向单独 vendor 源码的符号链接，而 vendor 子树不在这个仓库内。Actions 在缺少链接目标时创建明确标注的空 Kconfig stub，只用于准备公共内核头文件和编译本模块；这不等同于完整的 OnePlus 内核构建。若你有对应 vendor 源码，应在构建前恢复真实目录。
+该公开分支中多个 `kernel/`、`mm/` 路径是指向单独 vendor 源码的符号链接，而 vendor 子树不在这个仓库内。Actions 会先处理悬空链接，并在 Kconfig 报出缺失源文件时有界地创建明确标注的空 stub，只用于准备公共内核头文件和编译本模块；这不等同于完整的 OnePlus 内核构建。若你有对应 vendor 源码，应在构建前恢复真实目录。
 
 ### 使用 DDK Docker 镜像
 
@@ -62,7 +62,7 @@ docker run --rm --platform linux/amd64 \
 1. 检出本项目。
 2. 拉取固定 OnePlus 13 内核分支。
 3. 使用 `ghcr.io/ylarod/ddk:android15-6.6`。
-4. 使用 `KDIR` 的目标源码和 LLVM ARM64 参数构建外置模块。
+4. 使用 `KDIR` 的目标源码和 LLVM ARM64 参数构建外置模块，并在缺少 `Module.symvers` 时保留 modpost 警告以完成源码编译验证。
 5. 上传 `.ko`、构建日志、内核 commit 和配置摘要作为 artifact。
 
 工作流不会签名、刷写或加载模块。Android 设备通常启用了 `CONFIG_MODULE_SIG`、`CONFIG_MODVERSIONS`、CFI 或其他 GKI 约束，因此生成 `.ko` 仍必须使用与你设备运行内核完全匹配的 build output、`Module.symvers`、vermagic 和签名策略。
