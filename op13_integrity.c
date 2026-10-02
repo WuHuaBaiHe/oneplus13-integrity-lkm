@@ -8,6 +8,7 @@
  */
 #include <linux/atomic.h>
 #include <linux/crypto.h>
+#include <crypto/hash.h>
 #include <linux/delay.h>
 #include <linux/elf.h>
 #include <linux/init.h>
@@ -17,6 +18,7 @@
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
@@ -26,6 +28,7 @@
 #define OP13_HASH_SIZE 32
 #define OP13_CHECK_INTERVAL (60 * 60 * HZ)
 #define OP13_NAME_LEN 64
+#define OP13_MAX_MODULE_IMAGE (16UL * 1024 * 1024)
 
 struct op13_load_info {
 	const char *name;
@@ -64,12 +67,27 @@ static atomic_t op13_module_events = ATOMIC_INIT(0);
 static struct delayed_work op13_check_work;
 static struct proc_dir_entry *op13_proc_entry;
 
+struct op13_module_work {
+	struct work_struct work;
+	void *image;
+	size_t len;
+};
+
+static __nocfi unsigned long op13_call_lookup(kprobe_opcode_t *addr,
+						const char *name)
+{
+	op13_kallsyms_lookup_name_t lookup =
+		(op13_kallsyms_lookup_name_t)addr;
+
+	return lookup ? lookup(name) : 0;
+}
+
 static int op13_hash(const void *data, size_t len, u8 *out)
 {
 	SHASH_DESC_ON_STACK(desc, op13_sha256);
 	int ret;
 
-	if (!data || !out || IS_ERR_OR_NULL(op13_sha256))
+	if (!data || !out || IS_ERR_OR_NULL(op13_sha256) || len > UINT_MAX)
 		return -EINVAL;
 
 	desc->tfm = op13_sha256;
@@ -83,7 +101,6 @@ static unsigned long op13_lookup_symbol(const char *name)
 	struct kprobe kp = {
 		.symbol_name = "kallsyms_lookup_name",
 	};
-	op13_kallsyms_lookup_name_t lookup;
 	unsigned long address;
 	int ret;
 
@@ -91,8 +108,7 @@ static unsigned long op13_lookup_symbol(const char *name)
 	if (ret)
 		return 0;
 
-	lookup = (op13_kallsyms_lookup_name_t)kp.addr;
-	address = lookup ? lookup(name) : 0;
+	address = kp.addr ? op13_call_lookup(kp.addr, name) : 0;
 	unregister_kprobe(&kp);
 	return address;
 }
@@ -126,43 +142,61 @@ static void op13_check_workfn(struct work_struct *work)
 	schedule_delayed_work(&op13_check_work, OP13_CHECK_INTERVAL);
 }
 
-static char *op13_find_modinfo_name(struct op13_load_info *info)
+static char *op13_find_modinfo_name(void *image, size_t image_len)
 {
+	Elf_Ehdr *hdr = image;
 	Elf_Shdr *sections;
 	Elf_Shdr *strings;
 	char *section_names;
-	char *modinfo = NULL;
+	unsigned long table_len;
 	unsigned int i;
 
-	if (!info || !info->hdr)
+	if (!image || image_len < sizeof(*hdr) ||
+	    hdr->e_shentsize != sizeof(Elf_Shdr) || !hdr->e_shnum ||
+	    hdr->e_shstrndx >= hdr->e_shnum || hdr->e_shoff > image_len ||
+	    check_mul_overflow((unsigned long)hdr->e_shnum,
+				(unsigned long)hdr->e_shentsize, &table_len) ||
+	    table_len > image_len - hdr->e_shoff)
 		return NULL;
 
-	sections = (void *)info->hdr + info->hdr->e_shoff;
-	if (info->hdr->e_shstrndx >= info->hdr->e_shnum)
+	sections = (void *)hdr + hdr->e_shoff;
+	strings = &sections[hdr->e_shstrndx];
+	if (strings->sh_offset > image_len ||
+	    strings->sh_size > image_len - strings->sh_offset ||
+	    !strings->sh_size)
 		return NULL;
+	section_names = (void *)hdr + strings->sh_offset;
 
-	strings = &sections[info->hdr->e_shstrndx];
-	section_names = (void *)info->hdr + strings->sh_offset;
-	for (i = 1; i < info->hdr->e_shnum; i++) {
-		if (sections[i].sh_name >= strings->sh_size)
+	for (i = 1; i < hdr->e_shnum; i++) {
+		Elf_Shdr *section = &sections[i];
+		size_t name_len;
+
+		if (section->sh_offset > image_len ||
+		    section->sh_size > image_len - section->sh_offset ||
+		    section->sh_name >= strings->sh_size)
 			continue;
-		if (!strcmp(section_names + sections[i].sh_name, ".modinfo")) {
-			modinfo = (void *)info->hdr + sections[i].sh_offset;
-			break;
-		}
-	}
+		name_len = strnlen(section_names + section->sh_name,
+				   strings->sh_size - section->sh_name);
+		if (name_len == strings->sh_size - section->sh_name ||
+		    strcmp(section_names + section->sh_name, ".modinfo"))
+			continue;
 
-	if (modinfo) {
-		unsigned long remaining = sections[i].sh_size;
-		while (remaining) {
-			unsigned long len = strnlen(modinfo, remaining);
-			if (len == remaining)
-				break;
-			if (len > 5 && !memcmp(modinfo, "name=", 5))
-				return modinfo + 5;
-			modinfo += len + 1;
-			remaining -= len + 1;
+		{
+			char *modinfo = (void *)hdr + section->sh_offset;
+			size_t remaining = section->sh_size;
+
+			while (remaining) {
+				size_t len = strnlen(modinfo, remaining);
+
+				if (len == remaining)
+					break;
+				if (len > 5 && !memcmp(modinfo, "name=", 5))
+					return modinfo + 5;
+				modinfo += len + 1;
+				remaining -= len + 1;
+			}
 		}
+		break;
 	}
 
 	return NULL;
@@ -172,36 +206,70 @@ static int op13_module_entry(struct kretprobe_instance *instance,
 				     struct pt_regs *regs)
 {
 	struct op13_load_info *info;
+	struct op13_module_work *event;
+
+	if (!regs || !instance || !instance->data)
+		return 0;
+	*(struct op13_module_work **)instance->data = NULL;
+	info = (struct op13_load_info *)regs_get_kernel_argument(regs, 0);
+	if (!info || !info->hdr || info->len < sizeof(Elf_Ehdr) ||
+	    info->len > OP13_MAX_MODULE_IMAGE)
+		return 0;
+	event = kmalloc(sizeof(*event), GFP_ATOMIC);
+	if (!event)
+		return 0;
+	event->image = kvmalloc(info->len, GFP_ATOMIC);
+	if (!event->image) {
+		kfree(event);
+		return 0;
+	}
+	memcpy(event->image, info->hdr, info->len);
+	event->len = info->len;
+	*(struct op13_module_work **)instance->data = event;
+	return 0;
+}
+
+static void op13_module_workfn(struct work_struct *work)
+{
+	struct op13_module_work *event = container_of(work,
+						      struct op13_module_work, work);
 	u8 hash[OP13_HASH_SIZE];
 	char *name;
-	int ret;
 
-	if (!regs)
+	if (!op13_hash(event->image, event->len, hash)) {
+		name = op13_find_modinfo_name(event->image, event->len);
+		if (name)
+			pr_info("op13_integrity: module=%.*s sha256=%*phN\n",
+				OP13_NAME_LEN, name, OP13_HASH_SIZE, hash);
+		else
+			pr_info("op13_integrity: module name unavailable sha256=%*phN\n",
+				OP13_HASH_SIZE, hash);
+		atomic_inc(&op13_module_events);
+	}
+	kvfree(event->image);
+	kfree(event);
+}
+
+static int op13_module_return(struct kretprobe_instance *instance,
+				      struct pt_regs *regs)
+{
+	struct op13_module_work *event;
+
+	if (!instance || !instance->data)
 		return 0;
-
-	info = (struct op13_load_info *)regs_get_kernel_argument(regs, 0);
-	if (!info || !info->hdr || !info->len || info->len > ULONG_MAX / 2)
+	event = *(struct op13_module_work **)instance->data;
+	if (!event)
 		return 0;
-
-	ret = op13_hash(info->hdr, info->len, hash);
-	if (ret)
-		return 0;
-
-	name = op13_find_modinfo_name(info);
-	if (name)
-		pr_info("op13_integrity: module=%.*s sha256=%*phN\n",
-			OP13_NAME_LEN, name, OP13_HASH_SIZE, hash);
-	else
-		pr_info("op13_integrity: module name unavailable sha256=%*phN\n",
-			OP13_HASH_SIZE, hash);
-
-	atomic_inc(&op13_module_events);
+	INIT_WORK(&event->work, op13_module_workfn);
+	schedule_work(&event->work);
 	return 0;
 }
 
 static struct kretprobe op13_module_probe = {
 	.kp.symbol_name = "load_module",
 	.entry_handler = op13_module_entry,
+	.handler = op13_module_return,
+	.data_size = sizeof(struct op13_module_work *),
 	.maxactive = 32,
 };
 
@@ -282,6 +350,7 @@ static void __exit op13_integrity_exit(void)
 {
 	cancel_delayed_work_sync(&op13_check_work);
 	unregister_kretprobe(&op13_module_probe);
+	flush_workqueue(system_wq);
 	if (op13_proc_entry)
 		proc_remove(op13_proc_entry);
 	if (op13_sha256)
