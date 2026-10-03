@@ -27,6 +27,13 @@ jobs:
       - name: Checkout module project
         uses: actions/checkout@v4
 
+      - name: Verify exact pinned upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp upstream/oplus_kernel_security_check.c op13_integrity.c
+          printf '%s  %s\n' 47f6f8386f700220b609a1ea9a3f47a8fa2bddeeaeaa15645f90abe8b5319720 op13_integrity.c | sha256sum --check
+
       - name: Fetch target kernel source
         shell: bash
         run: |

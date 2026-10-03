@@ -1,6 +1,6 @@
 # OnePlus 13 integrity LKM
 
-将 Ace 6 Ultra 的 `oplus_kernel_security_check.c` 移植到 OnePlus 13 ARM64 Linux 6.6.118；保留原版有效客户端的协议、检测时机和事件语义。
+在 OnePlus 13 ARM64 Linux 6.6.118 构建环境中编译固定版本的 Ace 6 Ultra `oplus_kernel_security_check.c`。实际编译文件 `op13_integrity.c` 与固定上游文件逐字节一致，不包含自行添加的功能或安全修复。
 
 ## 来源和范围
 
@@ -45,20 +45,17 @@ inte_ko 用户事件：`u32 10000 + int32 正长度L + L字节事件内容`。�
 
 inte_ko 写回调要求线程 comm=`oplus_kohashpro` 且 raw euid=1000；root 也会被此校验拒绝。inte_status 和启用 debug 时的 inte_systbl 写要求 euid=0或1000。还必须通过 proc DAC 与设备 SELinux，euid=1000 本身不获得 root:root 节点的写权限。
 
-inte_status 写入至少4字节二进制整数；`echo 1` 不是协议正确的使用方式，不能用文本写替代。
+inte_status 正常写入为4字节二进制整数；`echo 1` 不是协议正确的使用方式。原版在 count<4 时仅打印错误，仍尝试 copy_from_user 4字节；本项目原样保留该异常路径。
 
 仅当 CONFIG_DYNAMIC_DEBUG、CONFIG_DEBUG_OBJECTS、CONFIG_DEBUG_KMEMLEAK 都启用时，inte_systbl 的首字节 ASCII `0` 检查真实表、`1` 修改复制数组第0项模拟异常（不修改真实 syscall 表）、`2` 清两事件队列。debug关闭时写操作空操作并返回长度。debug操作不受boot闸门限制。
 
-## 最小适配差异
+## 源码一致性
 
-运行时协议和正常检测路径按原版保留；差异限于：
+实际编译文件和 upstream 参考副本均为固定上游文件原始字节，Git blob 为 `692ddfcda0482100f6bf70f8ee254775da56e7c2`。未添加头文件、ELF校验、短写入拒绝、初始化/卸载重排或额外日志；原版的日志、错误返回和异常路径均保留。
 
-1. 显式包含目标内核头文件。
-2. 私有状态先初始化，再发布探针/proc；proc_create成功后设置所属，失败/卸载先撤销回调再释放状态，并释放失败路径已有白名单。
-3. ELF解析增加长度/字符串终止检查，损坏输入返回解析失败，避免越界。
-4. inte_status不足4字节的写入返回EINVAL；原版仅打印后仍复制4字节，这是明确的畸形输入行为修复。
+原版先发布proc，随后注册探针、创建syscall基线，最后hash_init；卸载在释放状态后才删除proc。这些并发窗口、原版ELF边界检查缺失、状态短写入以及debug共享缓冲行为均未修复。原版的源码缺陷也属于本项目保持零修改的范围。
 
-原版同步probe哈希的时延和debug检查共用摘要缓冲的并发限制保留；未改成异步工作队列，不添加审计字段。不能把这些适配宣称为连内存错误都逐字节复刻。
+字节一致只证明源码没有差异。OnePlus 13 与 Ace 6 Ultra 的内核配置、符号、CPU/密码实现、调度和SELinux环境不同，实际运行时间、哈希基线、事件和加载结果不能由源码一致推导为相同。配套用户空间服务和出厂配置未复制，实机结果须独立验证。
 
 ## GitHub Actions 构建
 
